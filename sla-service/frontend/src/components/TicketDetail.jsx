@@ -131,6 +131,97 @@ function DiffTable({ diff }) {
   );
 }
 
+function HandoffRecord({ h, versionLabel }) {
+  const [open, setOpen] = useState(false);
+  const ev = h.evidence || {};
+  return (
+    <li className="handoff-record">
+      <div className="row">
+        <span className="mono">{fmtDT(h.at)}</span>
+        <span>
+          {versionLabel(h.from_version)} → {versionLabel(h.to_version)}
+        </span>
+        <button className="link" onClick={() => setOpen(!open)}>
+          {open ? "收起证据" : "转派前证据"}
+        </button>
+      </div>
+      <div className="muted small">
+        转派时已累计 {fmtMin(ev.accumulated_minutes)}
+        ，历史分钟按原队列日历保留，后续按新队列规则计时
+      </div>
+      {open && (
+        <div className="basis">
+          <p className="small">
+            证据快照于 {fmtDT(ev.as_of)}：计入区间{" "}
+            {(ev.counted_intervals || []).length} 段、暂停区间{" "}
+            {(ev.paused_intervals || []).length} 段，明细如下：
+          </p>
+          <pre>{JSON.stringify(ev, null, 2)}</pre>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function HandoffSection({ detail, policies, run, onChanged }) {
+  const [target, setTarget] = useState("");
+  // 转派可跨队列（跨策略）：列出当前版本以外的所有版本
+  const targets = policies.flatMap((p) =>
+    p.versions
+      .filter((v) => v.policy_version_id !== detail.policy.policy_version_id)
+      .map((v) => ({
+        id: v.policy_version_id,
+        label: `${p.name} v${v.version}（警告 ${fmtMin(v.warn_minutes)} / 升级 ${fmtMin(v.escalate_minutes)}）`,
+      })),
+  );
+  const versionLabel = (id) => {
+    for (const p of policies)
+      for (const v of p.versions)
+        if (v.policy_version_id === id) return `${p.name} v${v.version}`;
+    return `版本 #${id}`;
+  };
+
+  async function doHandoff() {
+    if (!target) return;
+    const ok = await run(() =>
+      api.handoff(detail.id, Number(target), detail.revision),
+    );
+    if (ok) {
+      setTarget("");
+      await onChanged();
+    }
+  }
+
+  const handoffs = detail.handoffs || [];
+  return (
+    <div className="handoff">
+      <div className="row">
+        <select value={target} onChange={(e) => setTarget(e.target.value)}>
+          <option value="">选择目标队列版本…</option>
+          {targets.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={doHandoff}
+          disabled={!target || detail.status === "resolved"}
+        >
+          转派并保留累计工作分钟
+        </button>
+      </div>
+      {handoffs.length > 0 && (
+        <ul className="handoff-list">
+          {handoffs.map((h) => (
+            <HandoffRecord key={h.id} h={h} versionLabel={versionLabel} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function TicketDetail({ detail, policies, run, onChanged }) {
   const { timing } = detail;
   const [targetVersion, setTargetVersion] = useState("");
@@ -277,22 +368,16 @@ export default function TicketDetail({ detail, policies, run, onChanged }) {
         </ul>
       )}
 
-      <h3>队列接力</h3>
-      <button
-        onClick={async () => {
-          const version = Number(window.prompt("目标策略版本 ID"));
-          if (Number.isInteger(version) && version > 0) {
-            const ok = await run(() =>
-              api.handoff(detail.id, version, detail.revision),
-            );
-            if (ok) await onChanged();
-          }
-        }}
-        disabled={detail.status === "resolved"}
-      >
-        转派并保留累计工作分钟
-      </button>
-      <pre>{JSON.stringify(detail.handoffs || [], null, 2)}</pre>
+      <h3>
+        队列接力{" "}
+        <span className="muted small">({(detail.handoffs || []).length})</span>
+      </h3>
+      <HandoffSection
+        detail={detail}
+        policies={policies}
+        run={run}
+        onChanged={onChanged}
+      />
       <h3>策略迁移</h3>
       {otherVersions.length === 0 ? (
         <div className="muted small">

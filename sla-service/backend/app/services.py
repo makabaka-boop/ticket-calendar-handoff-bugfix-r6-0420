@@ -84,6 +84,18 @@ def ticket_detail(conn: sqlite3.Connection, ticket_id: int, now: datetime) -> di
             (ticket_id,),
         ).fetchall()
     ]
+    handoffs = [
+        {
+            "id": h["id"],
+            "from_version": h["from_version"],
+            "to_version": h["to_version"],
+            "at": h["at"],
+            "evidence": json.loads(h["evidence"]),
+        }
+        for h in __import__(__package__ + ".handoff", fromlist=["history"]).history(
+            conn, ticket_id
+        )
+    ]
     return {
         "id": t["id"],
         "title": t["title"],
@@ -102,9 +114,7 @@ def ticket_detail(conn: sqlite3.Connection, ticket_id: int, now: datetime) -> di
         "timing": public_timing(raw),
         "adjudications": adjudications,
         "migrations": migrations,
-        "handoffs": __import__(__package__ + ".handoff", fromlist=["history"]).history(
-            conn, ticket_id
-        ),
+        "handoffs": handoffs,
     }
 
 
@@ -241,7 +251,13 @@ def _basis(
 def adjudicate_ticket(
     conn: sqlite3.Connection, ticket_id: int, now: datetime
 ) -> list[str]:
-    """单个工单的扫描裁决。与用户操作走同一事务模型；唯一键保证只登记一次。"""
+    """单个工单的扫描裁决。与用户操作走同一事务模型；唯一键保证只登记一次。
+
+    转派不重置裁决：当前转派链内已送达的警告/升级不重复送达
+    （唯一键含版本，只能挡住同版本重复；跨版本接力靠 delivered_kinds）。
+    """
+    from .handoff import delivered_kinds
+
     fired: list[str] = []
     with tx(conn):
         t = conn.execute("SELECT * FROM ticket WHERE id = ?", (ticket_id,)).fetchone()
@@ -252,11 +268,12 @@ def adjudicate_ticket(
         pv = load_policy_version(conn, t["policy_version_id"])
         raw = raw_timing(conn, t, pv, now)
         acc_min = raw["accumulated_seconds"] / 60
+        delivered = delivered_kinds(conn, t)
         for kind, threshold in (
             ("warning", pv.warn_minutes),
             ("escalation", pv.escalate_minutes),
         ):
-            if acc_min >= threshold:
+            if acc_min >= threshold and kind not in delivered:
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO adjudication "
                     "(ticket_id, kind, policy_version_id, adjudicated_at, accumulated_minutes, threshold_minutes, basis_json) "

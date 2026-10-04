@@ -1,4 +1,5 @@
-"""演示数据：策略两个版本（不同阈值与日历）、五个处于不同状态的工单。
+"""演示数据：两个队列（策略），“标准支持”有两个版本（不同阈值与日历）、
+六个处于不同状态的工单，其中一个是跨队列转派演示。
 
 日历：2026-09-28 ~ 2026-10-30 的工作日；假日切口 2026-10-01/02。
 所有演示工单固定 v1（先创建工单、后发布 v2，模拟真实时序）。
@@ -10,7 +11,8 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from .db import tx
-from .services import create_policy_version, scan_all, set_status
+from .handoff import transfer
+from .services import adjudicate_ticket, create_policy_version, scan_all, set_status
 from .timeutil import now_utc, parse
 
 CAL_START = datetime(2026, 9, 28)  # 周一
@@ -100,6 +102,28 @@ def seed_if_empty(conn: sqlite3.Connection) -> bool:
         holiday_intervals=[("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")],
         now=now_utc(),
     )
+
+    # 第二个队列：VIP 支持（另一套工作日历与时限）
+    with tx(conn):
+        conn.execute("INSERT INTO policy (name) VALUES ('VIP 支持')")
+        vip_id = conn.execute(
+            "SELECT id FROM policy WHERE name='VIP 支持'"
+        ).fetchone()["id"]
+    vip_v1 = create_policy_version(
+        conn,
+        vip_id,
+        warn_minutes=120,
+        escalate_minutes=300,
+        work_intervals=weekdays(CAL_START, CAL_END, 8, 16),
+        holiday_intervals=[("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")],
+        now=now_utc(),
+    )
+
+    # 转派演示：标准支持 v1 下累计 660 分钟、警告+升级已送达；
+    # 09-30 12:00 转派 VIP 队列 —— 历史分钟保留，已送达裁决不重复
+    t6 = _create_ticket_at(conn, "转派演示：报表偶发超时", v1, "2026-09-29T09:00:00Z")
+    adjudicate_ticket(conn, t6, parse("2026-09-30T12:00:00Z"))
+    transfer(conn, t6, vip_v1, 1, parse("2026-09-30T12:00:00Z"))
 
     scan_all(conn, now_utc())
     return True

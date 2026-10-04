@@ -2,8 +2,10 @@
 
 模型：
 - 工单生命周期由若干“运行段”(ticket_segment) 组成；等待客户时段是两段之间的空隙。
-- 有效工作分钟 = 运行段 ∩ (工作区间 − 假日切口) 的总时长。
-- 截止时刻 = 从 now 起再累积剩余有效分钟的日历时刻（advance）。
+- 有效工作分钟 = 运行段 ∩ (工作区间 − 假日切口) 的总时长；转派边界把运行段
+  切开，每段按当时所属队列的日历计入（见 handoff.calendar_parts）。
+- 截止时刻 = 从 now 起再累积剩余有效分钟的日历时刻（advance），
+  剩余分钟始终按当前固定版本的日历与阈值计算。
 """
 
 from __future__ import annotations
@@ -102,6 +104,8 @@ def raw_timing(
     conn: sqlite3.Connection, ticket: sqlite3.Row, pv: PolicyVersionView, now: datetime
 ) -> dict:
     """核心计算，返回 datetime 原值，便于迁移差异等二次计算。"""
+    from .handoff import calendar_parts
+
     eff = pv.effective()
     segments = load_segments(conn, ticket["id"])
     counted: list[Interval] = []
@@ -110,8 +114,7 @@ def raw_timing(
         seg_end = min(e, now) if e is not None else now
         if seg_end <= s:
             continue
-        from .handoff import calendar_parts
-
+        # 转派边界把运行段切开：每段按当时所属队列的日历计入
         for calendar, lo, hi in calendar_parts(conn, ticket, pv, s, seg_end):
             for cs, ce in clip(calendar.effective(), lo, hi):
                 counted.append((cs, ce))

@@ -37,17 +37,27 @@ cd backend && ../.venv/bin/python -m pytest tests/ -v
 - `GET /api/tickets/{id}/migration-preview?to_version_id=` 预览旧/新差异（累计分钟、警告/升级截止、位移秒数），不落库。
 - `POST /api/tickets/{id}/migrate` 显式迁移：差异证据写入 `policy_migration.diff_json` 后同事务切换固定版本。历史裁决保留；迁移后按新版本重新裁决（唯一键含版本，不会与旧记录冲突）。
 
+## 队列转派（handoff）
+
+`POST /api/tickets/{id}/handoff` 把工单转派到另一队列（可跨策略），请求体形同迁移。与策略迁移的区别：
+
+- **历史投入按当时所属队列的日历计入**：`handoff` 表把工单时间轴切成指派区间，转派边界之前的运行段仍按原队列日历计时，不消失也不重算；边界之后服从新队列的日历与阈值（`app/handoff.py:version_timeline`）。
+- **暂停状态延续**：等待客户的工单转派后仍暂停，恢复后在新队列日历上、于既有累计分钟之上继续累积；详情接口按时间序返回每次转派的证据快照（转派前累计分钟/计入区间），与转派后的累计时间相互印证。
+- **已送达的裁决不重复**：当前转派链内已登记的警告/升级不再于新版本下重复送达（`handoff.delivered_kinds`）；唯一键 `(ticket_id, kind, policy_version_id)` 仍保证同版本内重复扫描与重启幂等。显式迁移才会重置裁决基线。
+- **原子性**：过期修订（409）、已解决、目标版本无效（404）、时间倒挂等校验全部先于写入，且证据登记与版本切换在同一 `BEGIN IMMEDIATE` 事务内——失败整体回滚，不留下半次转派的记录。
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/tickets` | 列表（累计分钟、升级截止、警告/升级标记） |
 | POST | `/api/tickets` | 创建并固定最新策略版本 |
-| GET | `/api/tickets/{id}` | 详情：截止时刻、已计入区间、暂停区间、升级记录、迁移证据 |
+| GET | `/api/tickets/{id}` | 详情：截止时刻、已计入区间、暂停区间、升级记录、迁移证据、转派证据 |
 | POST | `/api/tickets/{id}/status` | `{action: wait/resume/resolve, expected_revision}` |
 | GET/POST | `/api/policies`, `/api/policies/{id}/versions` | 策略与版本 |
 | GET | `/api/tickets/{id}/migration-preview` | 迁移差异预览 |
 | POST | `/api/tickets/{id}/migrate` | 显式迁移并保存证据 |
+| POST | `/api/tickets/{id}/handoff` | 转派到另一队列（保留历史分钟，证据落库） |
 | POST | `/api/scan` | 手动触发一轮裁决（后台每 15s 自动扫描） |
 
 所有端点支持 `?now=<ISO>` 指定裁决时点，便于演示与测试。
@@ -60,6 +70,7 @@ cd backend && ../.venv/bin/python -m pytest tests/ -v
 | `test_pause.py` | 暂停跨界：跨周末/跨假日暂停、恢复后续累积、暂停中预计截止 |
 | `test_race.py` | 到期与解决竞争：两种确定顺序 + 30 轮并发交错 + 重启后重复扫描幂等 |
 | `test_migration.py` | 策略迁移：新版本不影响旧工单、差异预览、证据保存、迁移后重新裁决、迁移冲突 |
+| `test_handoff.py` | 队列转派：历史分钟保留、后续服从新日历、暂停延续、裁决不重复、多队列接力、迁移重置基线、无效/过期/并发转派整体回滚、API 幂等 |
 | `test_api.py` | 过期修订 409、API 扫描幂等、页面字段完整性 |
 
 ## 目录
@@ -67,11 +78,9 @@ cd backend && ../.venv/bin/python -m pytest tests/ -v
 ```
 backend/app/intervals.py   区间运算（合并/相减/交集/advance）
 backend/app/timing.py      计时引擎（累计分钟、截止时刻、计入/暂停区间）
+backend/app/handoff.py     队列转派（指派区间时间轴、转派事务、裁决链）
 backend/app/services.py    事务化业务操作（状态、裁决、迁移）
 backend/app/main.py        FastAPI 路由 + 后台扫描器 + 静态托管
-backend/app/seed.py        演示数据（两个策略版本、五种状态工单）
+backend/app/seed.py        演示数据（两个队列、两个策略版本、六种状态工单）
 frontend/src/              React 前台（Vite 构建，dist 由后端托管）
 ```
-
-## Queue handoff
-POST /api/tickets/{id}/handoff uses the migration request shape. It differs from historical policy migration: elapsed working time remains credited under each previously assigned calendar, future time uses the new calendar and thresholds. Waiting remains paused. An already delivered warning/escalation is not delivered again after handoff. The detail API exposes chronological handoff evidence and the existing timing evidence. Revision conflicts reject the whole handoff.
