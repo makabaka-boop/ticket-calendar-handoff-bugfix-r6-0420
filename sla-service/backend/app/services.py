@@ -234,6 +234,7 @@ def _basis(
             "policy_version_id": pv.id,
         },
         "counted_intervals": [[iso(s), iso(e)] for s, e in raw["counted"]],
+        "counted_parts": raw["counted_parts"],
         "paused_intervals": [[iso(s), iso(e) if e else None] for s, e in raw["paused"]],
     }
 
@@ -252,11 +253,25 @@ def adjudicate_ticket(
         pv = load_policy_version(conn, t["policy_version_id"])
         raw = raw_timing(conn, t, pv, now)
         acc_min = raw["accumulated_seconds"] / 60
+        from .handoff import has_handoffs
+
+        # A queue handoff carries delivered outcomes with the ticket; a warning
+        # or escalation that existed before the handoff must not fire again.
+        already_delivered = (
+            {
+                r["kind"]
+                for r in conn.execute(
+                    "SELECT kind FROM adjudication WHERE ticket_id=?", (ticket_id,)
+                ).fetchall()
+            }
+            if has_handoffs(conn, ticket_id)
+            else set()
+        )
         for kind, threshold in (
             ("warning", pv.warn_minutes),
             ("escalation", pv.escalate_minutes),
         ):
-            if acc_min >= threshold:
+            if acc_min >= threshold and kind not in already_delivered:
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO adjudication "
                     "(ticket_id, kind, policy_version_id, adjudicated_at, accumulated_minutes, threshold_minutes, basis_json) "
@@ -367,6 +382,10 @@ def migration_preview(
 ) -> dict:
     """计算迁移差异（不写库）：旧/新累计分钟、截止时刻及位移。"""
     t = get_ticket(conn, ticket_id)
+    from .handoff import has_handoffs
+
+    if has_handoffs(conn, ticket_id):
+        raise BadRequest("工单已经发生队列转派，不能再用策略迁移改写逐段计时")
     old_pv = load_policy_version(conn, t["policy_version_id"])
     new_pv = load_policy_version(conn, to_version_id)
     if new_pv.policy_id != old_pv.policy_id:

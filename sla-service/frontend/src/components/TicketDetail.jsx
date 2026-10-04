@@ -74,6 +74,72 @@ function Adjudication({ a }) {
   );
 }
 
+function HandoffList({ handoffs }) {
+  if (!handoffs || handoffs.length === 0) {
+    return <div className="muted small">尚未发生队列转派。</div>;
+  }
+  return (
+    <ul className="migration-list">
+      {handoffs.map((h) => {
+        const from = h.evidence?.from;
+        const to = h.evidence?.to;
+        const before = from?.timing;
+        const after = to?.timing;
+        return (
+          <li key={h.id}>
+            <div className="row">
+              <span className="mono">{fmtDT(h.at)}</span>
+              <span>
+                {from?.policy?.name} v{from?.policy?.version} →{" "}
+                {to?.policy?.name} v{to?.policy?.version}
+              </span>
+              <span className="muted small">
+                转派时状态：{STATUS_LABEL[h.evidence?.status] || h.evidence?.status}
+              </span>
+            </div>
+            <table className="diff-table">
+              <tbody>
+                <tr>
+                  <td>累计有效分钟（历史保留）</td>
+                  <td className="mono">{fmtMin(before?.accumulated_minutes)}</td>
+                  <td className="mono">{fmtMin(after?.accumulated_minutes)}</td>
+                </tr>
+                <tr>
+                  <td>警告 / 升级阈值（接手队列）</td>
+                  <td className="mono">
+                    {fmtMin(from?.policy?.warn_minutes)} /{" "}
+                    {fmtMin(from?.policy?.escalate_minutes)}
+                  </td>
+                  <td className="mono">
+                    {fmtMin(to?.policy?.warn_minutes)} /{" "}
+                    {fmtMin(to?.policy?.escalate_minutes)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="muted small">
+              逐段计时（{after?.counted_parts?.length || 0} 段）：
+            </p>
+            <table>
+              <tbody>
+                {(after?.counted_parts || []).map((p, i) => (
+                  <tr key={i}>
+                    <td className="mono small">
+                      {fmtDT(p.start)} ~ {fmtDT(p.end)}
+                    </td>
+                    <td className="mono small">队列版本 #{p.policy_version_id}</td>
+                    <td className="mono small">{fmtMin(p.accumulated_minutes)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function DiffTable({ diff }) {
   const rows = [
     [
@@ -277,7 +343,10 @@ export default function TicketDetail({ detail, policies, run, onChanged }) {
         </ul>
       )}
 
-      <h3>队列接力</h3>
+      <h3>
+        队列接力{" "}
+        <span className="muted small">({(detail.handoffs || []).length})</span>
+      </h3>
       <button
         onClick={async () => {
           const version = Number(window.prompt("目标策略版本 ID"));
@@ -292,7 +361,7 @@ export default function TicketDetail({ detail, policies, run, onChanged }) {
       >
         转派并保留累计工作分钟
       </button>
-      <pre>{JSON.stringify(detail.handoffs || [], null, 2)}</pre>
+      <HandoffList handoffs={detail.handoffs} />
       <h3>策略迁移</h3>
       {otherVersions.length === 0 ? (
         <div className="muted small">

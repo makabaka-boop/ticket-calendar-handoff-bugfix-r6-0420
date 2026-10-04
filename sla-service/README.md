@@ -60,6 +60,7 @@ cd backend && ../.venv/bin/python -m pytest tests/ -v
 | `test_pause.py` | 暂停跨界：跨周末/跨假日暂停、恢复后续累积、暂停中预计截止 |
 | `test_race.py` | 到期与解决竞争：两种确定顺序 + 30 轮并发交错 + 重启后重复扫描幂等 |
 | `test_migration.py` | 策略迁移：新版本不影响旧工单、差异预览、证据保存、迁移后重新裁决、迁移冲突 |
+| `test_handoff.py` | 队列转派：历史按原队列日历逐段计入、等待状态延续、多队列接力、裁决不重复、无效转派整体回滚、API 409 与证据 |
 | `test_api.py` | 过期修订 409、API 扫描幂等、页面字段完整性 |
 
 ## 目录
@@ -74,4 +75,12 @@ frontend/src/              React 前台（Vite 构建，dist 由后端托管）
 ```
 
 ## Queue handoff
-POST /api/tickets/{id}/handoff uses the migration request shape. It differs from historical policy migration: elapsed working time remains credited under each previously assigned calendar, future time uses the new calendar and thresholds. Waiting remains paused. An already delivered warning/escalation is not delivered again after handoff. The detail API exposes chronological handoff evidence and the existing timing evidence. Revision conflicts reject the whole handoff.
+`POST /api/tickets/{id}/handoff` uses the migration request shape but is a distinct operation: it moves the ticket to another queue's policy version (thresholds + work calendar) **without rewriting history**.
+
+- **历史按当时队列计入**：`handoff` 表只记录边界时刻 `(from_version → to_version, at)`。计时引擎（`app/timing.py`）用 `calendar_parts` 把每个运行段在所有转派边界处切开，每一段都用该时刻所属队列版本的有效日历求交集，因此先前已计入的工作分钟不会消失，也不会被新日历重新增加；`counted_parts` 给出逐队列的分钟明细。
+- **后续服从新队列**：转派时刻之后的运行段只与新队列日历求交，剩余分钟按新阈值 `advance` 得到截止/预计截止。
+- **暂停延续**：等待客户期间转派不新增也不关闭任何运行段，工单仍为 `waiting_customer`；段间唯一的空隙继续作为暂停区间，恢复后在新队列日历上继续计时。
+- **裁决只发一次**：裁决按 `kind`（warning/escalation）跟随工单，不随版本重置。已经发出的警告或升级，转派后（含重复扫描与重启）不会再次发出；新队列下尚未发过的裁决在累计达到其阈值时首次登记。
+- **整体成功或整体回滚**：转派与 revision 校验在同一个 `BEGIN IMMEDIATE` 事务内。过期 revision 返回 409；已解决工单、目标版本不存在、目标等于当前版本、转派时刻早于工单/上一次转派都会拒绝，且不留半条 `handoff` 记录、不 bump revision。
+- **证据**：每条转派保存 `from/to` 两侧策略快照与计时快照（含逐队列 `counted_parts`）及当时状态，详情 API 按时间顺序返回 `handoffs`。
+- 已经发生过转派的工单不能再走“策略迁移”接口（那会按单一日历重算整段历史，破坏逐段归属）；策略迁移仍用于从未转派过的工单。

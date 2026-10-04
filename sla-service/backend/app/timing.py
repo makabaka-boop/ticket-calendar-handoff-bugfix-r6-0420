@@ -105,6 +105,8 @@ def raw_timing(
     eff = pv.effective()
     segments = load_segments(conn, ticket["id"])
     counted: list[Interval] = []
+    counted_parts = []
+    calendar_cache = {}
     acc_seconds = 0.0
     for s, e in segments:
         seg_end = min(e, now) if e is not None else now
@@ -112,10 +114,22 @@ def raw_timing(
             continue
         from .handoff import calendar_parts
 
-        for calendar, lo, hi in calendar_parts(conn, ticket, pv, s, seg_end):
+        for calendar, lo, hi in calendar_parts(
+            conn, ticket, pv, s, seg_end, calendar_cache
+        ):
+            part_seconds = 0.0
             for cs, ce in clip(calendar.effective(), lo, hi):
                 counted.append((cs, ce))
-                acc_seconds += (ce - cs).total_seconds()
+                part_seconds += (ce - cs).total_seconds()
+            acc_seconds += part_seconds
+            counted_parts.append(
+                {
+                    "policy_version_id": calendar.id,
+                    "start": iso(lo),
+                    "end": iso(hi),
+                    "accumulated_minutes": round(part_seconds / 60, 2),
+                }
+            )
 
     status = ticket["status"]
     running = status == "open"
@@ -139,6 +153,7 @@ def raw_timing(
         "running": running,
         "accumulated_seconds": acc_seconds,
         "counted": counted,
+        "counted_parts": counted_parts,
         "paused": paused_intervals(segments, status),
         "warn_deadline": warn_deadline,
         "escalate_deadline": esc_deadline,
@@ -162,5 +177,6 @@ def public_timing(raw: dict) -> dict:
         "projected_warn_deadline": dt(raw["projected_warn_deadline"]),
         "projected_escalate_deadline": dt(raw["projected_escalate_deadline"]),
         "counted_intervals": [[iso(s), iso(e)] for s, e in raw["counted"]],
+        "counted_parts": raw["counted_parts"],
         "paused_intervals": [[iso(s), iso(e) if e else None] for s, e in raw["paused"]],
     }
